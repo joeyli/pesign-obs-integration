@@ -601,7 +601,7 @@ for my $cert (sort @certs) {
 	print $fh $cert_props->{"pubkey"};
 	close($fh);
 	my $verified_message = openssl_pipe($signature,
-		"openssl rsautl -verify -inkey $filename -keyform DER -pubin");
+		"openssl pkeyutl -verifyrecover -inkey $filename -keyform DER -pubin");
 	unlink($filename);
 	if ($original_message ne $verified_message) {
 		verbose "$module_name: signature validation failed for $cert\n";
