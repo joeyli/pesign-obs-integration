@@ -58,7 +58,10 @@ while test $# -gt 0; do
 		exit 1
 	esac
 done
-if test -z "$files" -a -z "$pcrsig_files"; then
+if test -n "$pcrsig_files"; then
+	files="${files:+$files }$pcrsig_files"
+fi
+if test -z "$files"; then
 	exit 0
 fi
 if test -z "$output"; then
@@ -189,7 +192,9 @@ fi
 pushd "$RPM_BUILD_ROOT"
 # Producing the arguments of find command to pick files to .cpio.rsasign archive
 args=()
+pcrsig_patterns=()
 for pattern in $files; do
+	orig_pattern="$pattern"
 	pattern=${pattern#/}
 	if test "${pattern:0:2}" != "./"; then
 		pattern="./$pattern"
@@ -217,13 +222,17 @@ for pattern in $files; do
 		fi
 	    done
 	fi
-        if [ -z "$shifted_match" ]; then
-	    # Case A: no match, keep using original file pattern
-            args=("${args[@]}" -o -path "$pattern")
-        else
-	    # Case B: match, using shifted match pattern
-            args=("${args[@]}" -o -path "$shifted_match")
-        fi
+	# Case A: no shifted match, keep using original file pattern
+	# Case B: shifted match, using shifted match pattern
+        final_pattern="${shifted_match:-$pattern}"
+        args=("${args[@]}" -o -path "$final_pattern")
+	# If this pattern is from pcrsig_files, keep it for later handling
+        for pcrsig_pattern in $pcrsig_files; do
+                if [[ "$orig_pattern" == "$pcrsig_pattern" ]]; then
+                        pcrsig_patterns+=("$final_pattern")
+                        break
+                fi
+        done
 done
 # delete the leading -o
 unset args[0]
@@ -247,29 +256,33 @@ fi
 for f in "${files[@]}"; do
 	dest="$archive_dir/$f"
 	mkdir -p "${dest%/*}"
-	case "$f" in
-	./boot/* | *.efi | */lib/modules/*/vmlinu[xz] | */lib/modules/*/[Ii]mage | */lib/modules/*/z[Ii]mage)
-		if [ -f /usr/bin/pesign ]; then
-			pesign --certdir="$nss_db" -i "$f" -E $dest
-		else
-			# Non PE architectures like s390x
+        # Check if this is a pcrsig file
+        is_pcrsig=0
+        for pcrsig_pattern in "${pcrsig_patterns[@]}"; do
+                if [[ "$f" == $pcrsig_pattern ]]; then
+                        is_pcrsig=1
+                        break
+                fi
+        done
+        if [ "$is_pcrsig" -eq 1 ]; then
+                # Unified Kernel Images built with "ukify --policy-digest" carry in the .pcrsig
+                # section the TPM2 PCR policies to sign. Export the data to sign of each one as
+                # <file>.pcrsig.<bank>.<index>
+                /usr/lib/rpm/pesign/pesign-pcrsig export "$f" "$dest.pcrsig"
+        else
+		case "$f" in
+		./boot/* | *.efi | */lib/modules/*/vmlinu[xz] | */lib/modules/*/[Ii]mage | */lib/modules/*/z[Ii]mage)
+			if [ -f /usr/bin/pesign ]; then
+				pesign --certdir="$nss_db" -i "$f" -E $dest
+			else
+				# Non PE architectures like s390x
+				cp "$f" "$dest"
+			fi
+			;;
+		*)
 			cp "$f" "$dest"
-		fi
-		;;
-	*)
-		cp "$f" "$dest"
-	esac
-done
-# Unified Kernel Images built with "ukify --policy-digest" carry in the .pcrsig
-# section the TPM2 PCR policies to sign. Export the data to sign of each one as
-# <file>.pcrsig.<bank>.<index>
-for pattern in $pcrsig_files; do
-	pattern=${pattern#/}
-	for f in $(find . -type f -path "./$pattern"); do
-		dest="$archive_dir/$f"
-		mkdir -p "${dest%/*}"
-		/usr/lib/rpm/pesign/pesign-pcrsig export "$f" "$dest.pcrsig"
-	done
+		esac
+	fi
 done
 cd "$archive_dir"
 nfiles="$(find . -type f | wc -l)"
